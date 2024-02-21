@@ -1,0 +1,229 @@
+---
+title: "Data Exploration Project"
+output: word_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R-Markdown
+
+```{r include = FALSE}
+library(rio)
+library(stringr)
+library(lubridate)
+library(dplyr)
+library(fixest)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(rmarkdown)
+```
+
+```{r warning = FALSE}
+extracted_folder_path <- "Lab3_Rawdata"
+file_names <- list.files(path = extracted_folder_path, pattern = "trends_up_to_", full.names = TRUE)
+combined_data <- import_list(file_names, rbind = TRUE)
+combined_data<- combined_data%>%
+ mutate(short_date = str_sub(monthorweek, 1, 10))
+combined_data<- combined_data%>%
+  mutate(actual_date= ymd(short_date))
+combined_data <-combined_data%>%
+  mutate(month = floor_date(actual_date, unit = "month"))
+
+```
+
+```{r}
+scorecard_data <-import('Lab3_Rawdata/Most+Recent+Cohorts+(Scorecard+Elements).csv')
+id_name_link <- import('Lab3_Rawdata/id_name_link.csv')
+
+```
+
+```{r}
+id_name_link <- id_name_link %>%
+  group_by(schname) %>%
+  mutate(n = n()) %>%
+  filter(n == 1) %>%
+  ungroup() %>%
+  select(-n) 
+```
+
+```{r}
+cutoff_date <- as.Date('2015-09-15')
+month_cutoff <- as.Date('2015-10-15')
+```
+
+```{r}
+combined_data_joined<- combined_data %>%
+  inner_join(id_name_link, by = c("schname" = "schname"))%>%
+  mutate(post_treatment = if_else(actual_date < cutoff_date, FALSE, TRUE))%>%
+  mutate(pre_treatment = if_else(actual_date > cutoff_date, FALSE, TRUE))%>%
+  mutate(treatment = if_else(actual_date < cutoff_date, 'Pre Release', 'Post Release'))
+```
+
+```{r}
+index_means_and_sd <- combined_data_joined %>%
+  group_by(schname, keyword)%>%
+  mutate(standard_index = 
+           (index - mean(index, na.rm = TRUE)) / (sd(index, na.rm = TRUE))
+         )
+  
+index_means_and_sd<- index_means_and_sd%>%
+  group_by(unitid, actual_date)%>%
+  summarise(mean_weekly_index = mean(standard_index, na.rm = TRUE), .groups = 'drop')%>%
+  ungroup()
+
+
+```
+
+```{r}
+combined_data_index <- combined_data_joined%>%
+  inner_join(index_means_and_sd, by = c('unitid' = 'unitid', 'actual_date' = 'actual_date'))
+```
+
+```{r}
+combined_scorecard <- combined_data_index%>%
+  inner_join(scorecard_data, by = c('unitid' = 'UNITID'))
+```
+
+```{r warning = FALSE}
+filtered_combined <- combined_scorecard%>%
+  filter(PREDDEG == 3)%>%
+  mutate(reported_earning = as.numeric(`md_earn_wne_p10-REPORTED-EARNINGS`))
+
+filtered_combined <- filtered_combined%>% 
+  drop_na()
+```
+
+```{r}
+mean_earnings <- mean(filtered_combined$reported_earning, na.rm = TRUE)
+std_earnings <- sd(filtered_combined$reported_earning, na.rm = TRUE)
+```
+
+```{r}
+filtered_combined <- filtered_combined %>%
+  mutate(high_income = ifelse(reported_earning >= mean_earnings + std_earnings, TRUE, FALSE))%>%
+  mutate(low_income = ifelse(reported_earning <= mean_earnings - std_earnings, TRUE, FALSE))%>%
+  mutate(income = ifelse(reported_earning >= mean_earnings + std_earnings, "High Income", "Low Income"))
+
+filtered_combined <- filtered_combined%>%
+  filter(
+    reported_earning < mean_earnings - std_earnings | reported_earning > mean_earnings + std_earnings)
+
+filtered_combined <- filtered_combined %>%
+  mutate(
+    Month = month(ymd(month)),
+    Season = case_when(
+      Month %in% c(12, 1, 2) ~ "Winter",
+      Month %in% c(3, 4, 5) ~ "Spring",
+      Month %in% c(6, 7, 8) ~ "Summer",
+      Month %in% c(9, 10, 11) ~ "Fall",
+      TRUE ~ NA_character_  
+    )
+  )
+
+filter_more <- filtered_combined%>%
+  filter(actual_date < month_cutoff)
+
+```
+
+```{r}
+group_means <- filtered_combined %>%
+  group_by(post_treatment, high_income, treatment, income)%>%
+  summarise(mean_standard_index = mean(mean_weekly_index, na.rm = TRUE), .groups = 'drop')%>%
+  ungroup()
+
+group_means_short_run <- filter_more %>%
+  group_by(post_treatment, high_income, treatment, income)%>%
+  summarise(mean_standard_index = mean(mean_weekly_index, na.rm = TRUE), .groups = 'drop')%>%
+  ungroup()
+
+group_means_season <- filtered_combined%>%
+  group_by(post_treatment, high_income, treatment, income, Season)%>%
+  summarise(mean_standard_index = mean(mean_weekly_index, na.rm = TRUE), .groups = 'drop')%>%
+  ungroup()
+
+pre_treat_low <- group_means %>% filter(post_treatment == FALSE, high_income == FALSE) %>% pull(mean_standard_index)
+pre_treat_high <- group_means %>% filter(post_treatment == FALSE, high_income == TRUE) %>% pull(mean_standard_index)
+post_treat_low <- group_means %>% filter(post_treatment == TRUE, high_income == FALSE) %>% pull(mean_standard_index)
+post_treat_high<- group_means %>% filter(post_treatment == TRUE, high_income == TRUE) %>% pull(mean_standard_index)
+
+pre_treat_low_sr <- group_means_short_run %>% filter(post_treatment == FALSE, high_income == FALSE) %>% pull(mean_standard_index)
+pre_treat_high_sr <- group_means_short_run %>% filter(post_treatment == FALSE, high_income == TRUE) %>% pull(mean_standard_index)
+post_treat_low_sr <- group_means_short_run %>% filter(post_treatment == TRUE, high_income == FALSE) %>% pull(mean_standard_index)
+post_treat_high_sr<- group_means_short_run %>% filter(post_treatment == TRUE, high_income == TRUE) %>% pull(mean_standard_index)
+  
+did_est <- ((pre_treat_low - post_treat_low)-(pre_treat_high - post_treat_high))
+did_est_sr <- ((pre_treat_low_sr - post_treat_low_sr)- (pre_treat_high_sr - post_treat_high_sr))
+
+print(did_est)
+print(did_est_sr)
+```
+
+```{r echo = FALSE}
+model <- 
+  feols(mean_weekly_index ~ high_income + post_treatment + high_income * post_treatment, data = filtered_combined)
+
+model_sr <- feols(mean_weekly_index ~ high_income + post_treatment + high_income*post_treatment, data = filter_more)
+
+model_seasonal <- feols(mean_weekly_index ~ high_income + post_treatment + high_income * post_treatment | Season, data = filtered_combined)
+
+
+ggplot(group_means, aes(x = treatment, y = mean_standard_index, group = income, color = income)) +
+  geom_line(aes(linetype = income), size = 1) + 
+  geom_point(size = 3) +
+  labs(title = "Effect of the Scorecard Release on Relative Search Interest Between High and Low earning Colleges",
+       x = "Scorecard Release",
+       y = "Standardized Search Interest",
+       color = "") +
+  theme_minimal() +
+  scale_x_discrete(limit = c("Pre Release", "Post Release"))
+
+ggplot(group_means_short_run, aes(x = treatment, y = mean_standard_index, group = income, color = income)) +
+  geom_line(aes(linetype = income), size = 1) + 
+  geom_point(size = 3) +
+  labs(title = "Effect of the Scorecard Release on Relative Search Interest Between High and Low Earning Colleges After One Month",
+       x = "Scorecard Release",
+       y = "Standardized Search Interest",
+       color = "") +
+  theme_minimal() +
+  scale_x_discrete(limit = c("Pre Release", "Post Release"))
+
+etable(model, model_sr, model_seasonal)
+```
+
+```{r}
+
+ggdensity(filtered_combined$index, 
+          main = "Density plot index",
+          xlab = "index")
+ggdensity(filtered_combined$reported_earning, 
+          main = "Density plot reported earning",
+          xlab = "reported earnings")
+sample_test <- sample_n(filtered_combined, 4900)
+
+shapiro.test(sample_test$reported_earning)
+shapiro.test(sample_test$index)
+
+#this was to check and make sure that the data I'm working with is normally distributed. 
+```
+
+Because the research question asks how the change in search interest of high income colleges relative to low income ones was effected by the publishing of the College Scorecard, I elected to choose a difference in difference methodology for my analysis. Difference in difference is usually used when there is a control group, and in that instance it will tell you the effect of the treatment on the treated group. In this case, because there is no control group what I'm doing isn't really a difference in differences approach, but my analysis will still output the impact on one group relative to another, which is aligned with the research question.
+
+Standardizing the index based on keyword and school name means that a one unit change in standardized index means one standard deviation change in search interest. A value of zero means that the index that week is the same as the overall mean index which would mean there is no change in search interest compared to the schools historical search interest for that week. This allows us to aggregate the change in search interest for schools with varying levels of baseline search interest, and compare how they change over time. I decided to aggregate by unitid, which is unique to each university, and by actual_date, which is the week in which the observation was recorded. This will allow me in the future to better isolate the effect of the scorecard release both immediately after its release, and in a longer run.
+
+After tying together the scorecard data, I filtered for schools that predominately grant bachelors degrees. Then, because the research question revolves around the post graduation earnings, I created three dummy variables for income. In this case, I decided that the mean of all reported incomes could function as a reference to define lower and higher earning colleges. The first would track if the income for a particular school was below average and assign True to observations that met the criteria, the next would track if it was above average and do the same, and the final one would simply label the observation as "high income", or "low income". The reason I did this was to give myself more options in case I wanted to try different types of analysis. I made sure to filter out any colleges that were within one standard deviation from the mean, as doing so would help isolate the significantly higher and lower income colleges which are the subject of the research question.
+
+One of my final steps before running my regression was to find the difference in difference manually as the difference in differences estimate should be the equal to the coefficient on my interaction term. If they match, I know I have not made any glaring mistakes in my data cleaning.
+
+For my analysis I decided to run three regressions. The first would look at the impact of the College Scoreboard on the relative mean index by week for high and low earning colleges. This regression has no limitations on time so the effect shown in the regression shows the change in interest for the entire post treatment period relative to the pre treatment period for high and low earning colleges. I decided to use the equation for difference in difference that we learned in class for the reasons I have explained above. The second regression is the same as the first but only takes post release observations for one month after the release of the scorecard. This is to see if the effect of the scorecard release changed over time, and to what extent. In the final regression I ran I included seasonal controls as fixed effects to try and control for the variation within school caused by seasons. I would assume that interest would likely be higher in the fall and spring as students are applying to school and accepting admission during those times and would likely be more engaged in college research.
+
+In my analysis I found that the introduction of the College Scorecard increased search activity on Google Trends for colleges with high earning graduates by 4.6% of a standard deviation in search interest relative to what it did for colleges with low earning graduates, with a standard of error of 0.00095 standard deviations. This result comes from the interaction term in my regression between high_incomeTrue and post_treatmentTrue. Overall, search interest in both high earning colleges and low earning colleges fell relative to their pre release mean search interest, which indicates that in the long run, the effect of the College Scoreboard was negligible in its impact on overall search interest, but did have a modest effect on the relative search interests of high earning colleges and low earning colleges.
+
+My second regression yielded similar results, but had a slightly larger effect on the relative increase for high earning colleges to low earning colleges, being a difference of about 5.3% of a standard deviation. Whats also interesting about the one month analysis is that the coefficient on on post_treatmentTrue is positive, whereas in my frist regression it was negative. The graph also shows that unlike in my first regression, when compared to their pre release means, the search interest in both low earning and high earning colleges rose. That being said, this month was also October, which is when many high school seniors would working with their college applications, which would also explain the increase in search interest. That being said, the search interest for high earning colleges increased by 5.3% of a standard deviation relative to low earning colleges, which is likely attributable to the scorecard release.
+
+My third regression is more for fun than for anything else. I wanted to try and include fixed effects for season as a way to control for the variation in search interest caused by the season trends in high school seniors that could have explained the results in my previous regression. The within R2 suggests that season is only responsible for about 1.7% of the variation in search interest within income. This suggest to me that it is probably a needless control, although the R2 is higher than the other regressions which could suggest that more of the variation in search index is explained by including season as a fixed effect. But overall, the coefficient on the itneraction is not statistically significant which leads me to believe that including Season Fixed Effects makes th regression less accurate.
+
+To summarize, among colleges that predominantly grant bachelors degrees, the release of the the College Scorecard Data increased search interest for colleges with high earning graduates by 4.6% of a standard deviation relative to colleges with low earning graduates. This shift suggests a modest impact of the scorecard on student interest towards colleges with high earning graduates.
